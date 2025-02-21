@@ -336,6 +336,40 @@ class MultiHeadSelfAttention(nn.Module):
         init.constant_(self.value_dense.bias, 0)
         init.constant_(self.combine_heads.bias, 0)
 
+# class Denoiser(nn.Module):
+#     def __init__(self, num_filters, kernel_size=3, activation='relu'):
+#         super(Denoiser, self).__init__()
+#         self.conv1 = nn.Conv2d(1, num_filters, kernel_size=kernel_size, padding=1)
+#         self.conv2 = nn.Conv2d(num_filters, num_filters, kernel_size=kernel_size, stride=2, padding=1)
+#         self.conv3 = nn.Conv2d(num_filters, num_filters, kernel_size=kernel_size, stride=2, padding=1)
+#         self.conv4 = nn.Conv2d(num_filters, num_filters, kernel_size=kernel_size, stride=2, padding=1)
+#         self.bottleneck = MultiHeadSelfAttention(embed_size=num_filters, num_heads=4)
+#         self.up2 = nn.Upsample(scale_factor=2, mode='nearest')
+#         self.up3 = nn.Upsample(scale_factor=2, mode='nearest')
+#         self.up4 = nn.Upsample(scale_factor=2, mode='nearest')
+#         self.output_layer = nn.Conv2d(1, 1, kernel_size=kernel_size, padding=1)
+#         self.res_layer = nn.Conv2d(num_filters, 1, kernel_size=kernel_size, padding=1)
+#         self.activation = getattr(F, activation)
+#         self._init_weights()
+
+#     def forward(self, x):
+#         x1 = self.activation(self.conv1(x))
+#         x2 = self.activation(self.conv2(x1))
+#         x3 = self.activation(self.conv3(x2))
+#         x4 = self.activation(self.conv4(x3))
+#         x = self.bottleneck(x4)
+#         x = self.up4(x)
+#         x = self.up3(x + x3)
+#         x = self.up2(x + x2)
+#         x = x + x1
+#         x = self.res_layer(x)
+#         return torch.tanh(self.output_layer(x + x))
+    
+#     def _init_weights(self):
+#         for layer in [self.conv1, self.conv2, self.conv3, self.conv4, self.output_layer, self.res_layer]:
+#             init.kaiming_uniform_(layer.weight, a=0, mode='fan_in', nonlinearity='relu')
+#             if layer.bias is not None:
+#                 init.constant_(layer.bias, 0)
 class Denoiser(nn.Module):
     def __init__(self, num_filters, kernel_size=3, activation='relu'):
         super(Denoiser, self).__init__()
@@ -343,8 +377,16 @@ class Denoiser(nn.Module):
         self.conv2 = nn.Conv2d(num_filters, num_filters, kernel_size=kernel_size, stride=2, padding=1)
         self.conv3 = nn.Conv2d(num_filters, num_filters, kernel_size=kernel_size, stride=2, padding=1)
         self.conv4 = nn.Conv2d(num_filters, num_filters, kernel_size=kernel_size, stride=2, padding=1)
-        # self.bottleneck = MultiHeadSelfAttention(embed_size=num_filters, num_heads=4)
-        self.bottleneck = SS2D(d_model=num_filters,dropout=0)   # 加入Mamba的SS2D模块，输入参数都为源代码指定参数
+
+        # 替換 MultiHeadSelfAttention 為 SS2D
+        self.bottleneck = SS2D(
+            d_model=num_filters,  # 讓 d_model 與原本的 embed_size 對應
+            d_state=16,  # 根據 SS2D 預設值
+            d_conv=3, 
+            expand=2, 
+            dt_rank="auto"
+        )
+
         self.up2 = nn.Upsample(scale_factor=2, mode='nearest')
         self.up3 = nn.Upsample(scale_factor=2, mode='nearest')
         self.up4 = nn.Upsample(scale_factor=2, mode='nearest')
@@ -358,20 +400,91 @@ class Denoiser(nn.Module):
         x2 = self.activation(self.conv2(x1))
         x3 = self.activation(self.conv3(x2))
         x4 = self.activation(self.conv4(x3))
-        x = self.bottleneck(x4)
-        x = self.up4(x)
+
+        # 使用 SS2D 取代 MultiHeadSelfAttention
+        x_bottleneck, _, _, _ = self.bottleneck(x4)  # 選擇第一個輸出來匹配形狀 (B, C, H, W)
+
+        x = self.up4(x_bottleneck)
         x = self.up3(x + x3)
         x = self.up2(x + x2)
         x = x + x1
         x = self.res_layer(x)
         return torch.tanh(self.output_layer(x + x))
-    
+
     def _init_weights(self):
         for layer in [self.conv1, self.conv2, self.conv3, self.conv4, self.output_layer, self.res_layer]:
             init.kaiming_uniform_(layer.weight, a=0, mode='fan_in', nonlinearity='relu')
             if layer.bias is not None:
                 init.constant_(layer.bias, 0)
 
+# class LYT(nn.Module):
+#     def __init__(self, filters=32):
+#         super(LYT, self).__init__()
+#         self.process_y = self._create_processing_layers(filters)
+#         self.process_cb = self._create_processing_layers(filters)
+#         self.process_cr = self._create_processing_layers(filters)
+
+#         self.denoiser_cb = Denoiser(filters // 2)
+#         self.denoiser_cr = Denoiser(filters // 2)
+#         self.lum_pool = nn.MaxPool2d(8)
+#         self.lum_mhsa = MultiHeadSelfAttention(embed_size=filters, num_heads=4)
+#         self.lum_up = nn.Upsample(scale_factor=8, mode='nearest')
+#         self.lum_conv = nn.Conv2d(filters, filters, kernel_size=1, padding=0)
+#         self.ref_conv = nn.Conv2d(filters * 2, filters, kernel_size=1, padding=0)
+#         self.msef = MSEFBlock(filters)
+#         self.recombine = nn.Conv2d(filters * 2, filters, kernel_size=3, padding=1)
+#         self.final_adjustments = nn.Conv2d(filters, 3, kernel_size=3, padding=1)
+#         self._init_weights()
+
+#     def _create_processing_layers(self, filters):
+#         return nn.Sequential(
+#             nn.Conv2d(1, filters, kernel_size=3, padding=1),
+#             nn.ReLU(inplace=True)
+#         )
+    
+#     def _rgb_to_ycbcr(self, image):
+#         r, g, b = image[:, 0, :, :], image[:, 1, :, :], image[:, 2, :, :]
+    
+#         y = 0.299 * r + 0.587 * g + 0.114 * b
+#         u = -0.14713 * r - 0.28886 * g + 0.436 * b + 0.5
+#         v = 0.615 * r - 0.51499 * g - 0.10001 * b + 0.5
+        
+#         yuv = torch.stack((y, u, v), dim=1)
+#         return yuv
+
+#     def forward(self, inputs):
+#         ycbcr = self._rgb_to_ycbcr(inputs)
+#         y, cb, cr = torch.split(ycbcr, 1, dim=1)
+#         cb = self.denoiser_cb(cb) + cb
+#         cr = self.denoiser_cr(cr) + cr
+
+#         y_processed = self.process_y(y)
+#         cb_processed = self.process_cb(cb)
+#         cr_processed = self.process_cr(cr)
+
+#         ref = torch.cat([cb_processed, cr_processed], dim=1)
+#         lum = y_processed
+#         lum_1 = self.lum_pool(lum)
+#         lum_1 = self.lum_mhsa(lum_1)
+#         lum_1 = self.lum_up(lum_1)
+#         lum = lum + lum_1
+
+#         ref = self.ref_conv(ref)
+#         shortcut = ref
+#         ref = ref + 0.2 * self.lum_conv(lum)
+#         ref = self.msef(ref)
+#         ref = ref + shortcut
+
+#         recombined = self.recombine(torch.cat([ref, lum], dim=1))
+#         output = self.final_adjustments(recombined)
+#         return torch.sigmoid(output)
+    
+#     def _init_weights(self):
+#         for module in self.children():
+#             if isinstance(module, nn.Conv2d) or isinstance(module, nn.Linear):
+#                 init.kaiming_uniform_(module.weight, a=0, mode='fan_in', nonlinearity='relu')
+#                 if module.bias is not None:
+#                     init.constant_(module.bias, 0)
 class LYT(nn.Module):
     def __init__(self, filters=32):
         super(LYT, self).__init__()
@@ -382,8 +495,16 @@ class LYT(nn.Module):
         self.denoiser_cb = Denoiser(filters // 2)
         self.denoiser_cr = Denoiser(filters // 2)
         self.lum_pool = nn.MaxPool2d(8)
-        # self.lum_mhsa = MultiHeadSelfAttention(embed_size=filters, num_heads=4)
-        self.lum_mhsa = SS2D(d_model=filters,dropout=0)
+
+        # 替換 MultiHeadSelfAttention 為 SS2D
+        self.lum_mhsa = SS2D(
+            d_model=filters,  # 讓 d_model 與 filters 保持一致
+            d_state=16, 
+            d_conv=3, 
+            expand=2, 
+            dt_rank="auto"
+        )
+
         self.lum_up = nn.Upsample(scale_factor=8, mode='nearest')
         self.lum_conv = nn.Conv2d(filters, filters, kernel_size=1, padding=0)
         self.ref_conv = nn.Conv2d(filters * 2, filters, kernel_size=1, padding=0)
@@ -420,8 +541,12 @@ class LYT(nn.Module):
 
         ref = torch.cat([cb_processed, cr_processed], dim=1)
         lum = y_processed
+
         lum_1 = self.lum_pool(lum)
-        lum_1 = self.lum_mhsa(lum_1)
+
+        # 使用 SS2D 取代 MultiHeadSelfAttention
+        lum_1, _, _, _ = self.lum_mhsa(lum_1)  # 選擇第一個輸出來匹配形狀 (B, C, H, W)
+
         lum_1 = self.lum_up(lum_1)
         lum = lum + lum_1
 
@@ -441,4 +566,3 @@ class LYT(nn.Module):
                 init.kaiming_uniform_(module.weight, a=0, mode='fan_in', nonlinearity='relu')
                 if module.bias is not None:
                     init.constant_(module.bias, 0)
-                    
