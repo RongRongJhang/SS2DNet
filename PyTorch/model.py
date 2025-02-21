@@ -67,11 +67,11 @@ class mamba_init:
         return A_logs, Ds, dt_projs_weight, dt_projs_bias
 
 class SS2D(nn.Module):
-    def __init__(self, embed_size, num_heads, d_state=16, ssm_ratio=2.0, forward_type="v2"):
+    def __init__(self, embed_size, num_heads, d_state=16, ssm_ratio=1.0, forward_type="v2"):  # 將 ssm_ratio 改為 1.0
         super(SS2D, self).__init__()
         self.embed_size = embed_size
         self.d_state = d_state
-        self.d_inner = int(ssm_ratio * embed_size)
+        self.d_inner = int(ssm_ratio * embed_size)  # 現在 d_inner 與 embed_size 相同
         self.dt_rank = math.ceil(embed_size / 16)  # 根據原始 SS2D 的預設設置
         self.k_group = 4
         self.channel_first = True  # 匹配 MultiHeadSelfAttention 的輸出格式 (batch_size, embed_size, height, width)
@@ -103,7 +103,7 @@ class SS2D(nn.Module):
 
         # 輸出層
         self.out_norm = nn.LayerNorm(self.d_inner)
-        self.out_proj = nn.Linear(self.d_inner, embed_size, bias=False)
+        self.out_proj = nn.Linear(self.d_inner, embed_size, bias=False)  # 投影回 embed_size
         self.dropout = nn.Dropout(0.0)  # 可根據需求調整 dropout 率
 
     def forward(self, x):
