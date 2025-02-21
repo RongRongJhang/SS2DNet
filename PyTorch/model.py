@@ -149,30 +149,33 @@ class SS2D(nn.Module):
         K = 4
 
         x_hwwh = torch.stack([x.view(B, -1, L), torch.transpose(x, dim0=2, dim1=3).contiguous().view(B, -1, L)], dim=1).view(B, 2, -1, L)
-        xs = torch.cat([x_hwwh, torch.flip(x_hwwh, dims=[-1])], dim=1) # (b, k, d, l)
+        xs = torch.cat([x_hwwh, torch.flip(x_hwwh, dims=[-1])], dim=1)  # (B, K, d_inner, L)
 
         x_dbl = torch.einsum("b k d l, k c d -> b k c l", xs.view(B, K, -1, L), self.x_proj_weight)
-        # x_dbl = x_dbl + self.x_proj_bias.view(1, K, -1, 1)
         dts, Bs, Cs = torch.split(x_dbl, [self.dt_rank, self.d_state, self.d_state], dim=2)
         dts = torch.einsum("b k r l, k d r -> b k d l", dts.view(B, K, -1, L), self.dt_projs_weight)
-        # dts = dts + self.dt_projs_bias.view(1, K, -1, 1)
 
-        xs = xs.float().view(B, -1, L) # (b, k * d, l)
-        dts = dts.contiguous().float().view(B, -1, L) # (b, k * d, l)
-        Bs = Bs.float().view(B, K, -1, L) # (b, k, d_state, l)
-        Cs = Cs.float().view(B, K, -1, L) # (b, k, d_state, l)
-        Ds = self.Ds.float().view(-1) # (k * d)
-        As = -torch.exp(self.A_logs.float()).view(-1, self.d_state)  # (k * d, d_state)
-        dt_projs_bias = self.dt_projs_bias.float().view(-1) # (k * d)
+        xs = xs.float().view(B, -1, L)  # (B, K*d_inner, L)
+        dts = dts.contiguous().float().view(B, -1, L)  # (B, K*d_inner, L)
+        Bs = Bs.float().view(B, K, -1, L)  # (B, K, d_state, L)
+        Cs = Cs.float().view(B, K, -1, L)  # (B, K, d_state, L)
+        Ds = self.Ds.float().view(-1)  # (K*d_inner)
+        As = -torch.exp(self.A_logs.float()).view(-1, self.d_state)  # (K*d_inner, d_state)
+        dt_projs_bias = self.dt_projs_bias.float().view(-1)  # (K*d_inner)
 
-        out_y = self.selective_scan(
-            xs, dts, 
-            As, Bs, Cs, Ds, z=None,
+        # 使用 selective_scan_fn，並只傳遞支援的參數
+        out_y = selective_scan_fn(
+            u=xs,
+            delta=dts,
+            A=As,
+            B=Bs,
+            C=Cs,
+            D=Ds,
             delta_bias=dt_projs_bias,
             delta_softplus=True,
-            return_last_state=False,
+            oflex=True,
+            backend=None  # 根據環境自動選擇最佳後端
         ).view(B, K, -1, L)
-        assert out_y.dtype == torch.float
 
         inv_y = torch.flip(out_y[:, 2:4], dims=[-1]).view(B, 2, -1, L)
         wh_y = torch.transpose(out_y[:, 1].view(B, -1, W, H), dim0=2, dim1=3).contiguous().view(B, -1, L)
@@ -219,25 +222,33 @@ class SS2D(nn.Module):
 
         return out_y[:, 0], inv_y[:, 0], wh_y, invwh_y
 
-    def forward(self, x: torch.Tensor, **kwargs):
-        B, H, W, C = x.shape
+    def forward(self, x: torch.Tensor):
+        B, C, H, W = x.shape
+        # 將 (B, C, H, W) 展平為 (B, C, H*W)
+        x = x.view(B, C, H * W)  # (B, d_model, L)
 
-        xz = self.in_proj(x)
-        x, z = xz.chunk(2, dim=-1) # (b, h, w, d)
+        # 通過 in_proj 擴展通道
+        x = self.in_proj(x.transpose(1, 2)).transpose(1, 2)  # (B, d_inner*2, L)
+        x = x[:, :self.d_inner, :]  # 只取前半部分作為 x，忽略後半部分
 
-        x = x.permute(0, 3, 1, 2).contiguous()
-        x = self.act(self.conv2d(x)) # (b, d, h, w)
-        y1, y2, y3, y4 = self.forward_core(x)
-        assert y1.dtype == torch.float32
-        y = y1 + y2 + y3 + y4
-        y = torch.transpose(y, dim0=1, dim1=2).contiguous().view(B, H, W, -1)
-        y = self.out_norm(y)
-        y = y * F.silu(z)
-        out = self.out_proj(y)
+        # 卷積和激活
+        x = x.view(B, self.d_inner, H, W)  # (B, d_inner, H, W)
+        x = self.conv2d(x)  # (B, d_inner, H, W)
+        x = self.act(x)  # (B, d_inner, H, W)
+        x = x.view(B, self.d_inner, H * W)  # (B, d_inner, L)
+
+        # 核心處理
+        y1, y2, y3, y4 = self.forward_corev0(x.view(B, self.d_inner, H, W))  # 各 (B, d_inner, L)
+        y = (y1 + y2 + y3 + y4) / 4  # 平均融合
+
+        # 後處理
+        y = self.out_norm(y.transpose(1, 2)).transpose(1, 2)  # (B, d_inner, L)
+        y = self.out_proj(y.transpose(1, 2)).transpose(1, 2)  # (B, d_model, L)
+        y = y.view(B, self.d_model, H, W)  # (B, d_model, H, W)
+
         if self.dropout is not None:
-            out = self.dropout(out)
-
-        return out
+            y = self.dropout(y)
+        return y
 
 class LayerNormalization(nn.Module):
     def __init__(self, dim):
@@ -336,40 +347,6 @@ class MultiHeadSelfAttention(nn.Module):
         init.constant_(self.value_dense.bias, 0)
         init.constant_(self.combine_heads.bias, 0)
 
-# class Denoiser(nn.Module):
-#     def __init__(self, num_filters, kernel_size=3, activation='relu'):
-#         super(Denoiser, self).__init__()
-#         self.conv1 = nn.Conv2d(1, num_filters, kernel_size=kernel_size, padding=1)
-#         self.conv2 = nn.Conv2d(num_filters, num_filters, kernel_size=kernel_size, stride=2, padding=1)
-#         self.conv3 = nn.Conv2d(num_filters, num_filters, kernel_size=kernel_size, stride=2, padding=1)
-#         self.conv4 = nn.Conv2d(num_filters, num_filters, kernel_size=kernel_size, stride=2, padding=1)
-#         self.bottleneck = MultiHeadSelfAttention(embed_size=num_filters, num_heads=4)
-#         self.up2 = nn.Upsample(scale_factor=2, mode='nearest')
-#         self.up3 = nn.Upsample(scale_factor=2, mode='nearest')
-#         self.up4 = nn.Upsample(scale_factor=2, mode='nearest')
-#         self.output_layer = nn.Conv2d(1, 1, kernel_size=kernel_size, padding=1)
-#         self.res_layer = nn.Conv2d(num_filters, 1, kernel_size=kernel_size, padding=1)
-#         self.activation = getattr(F, activation)
-#         self._init_weights()
-
-#     def forward(self, x):
-#         x1 = self.activation(self.conv1(x))
-#         x2 = self.activation(self.conv2(x1))
-#         x3 = self.activation(self.conv3(x2))
-#         x4 = self.activation(self.conv4(x3))
-#         x = self.bottleneck(x4)
-#         x = self.up4(x)
-#         x = self.up3(x + x3)
-#         x = self.up2(x + x2)
-#         x = x + x1
-#         x = self.res_layer(x)
-#         return torch.tanh(self.output_layer(x + x))
-    
-#     def _init_weights(self):
-#         for layer in [self.conv1, self.conv2, self.conv3, self.conv4, self.output_layer, self.res_layer]:
-#             init.kaiming_uniform_(layer.weight, a=0, mode='fan_in', nonlinearity='relu')
-#             if layer.bias is not None:
-#                 init.constant_(layer.bias, 0)
 class Denoiser(nn.Module):
     def __init__(self, num_filters, kernel_size=3, activation='relu'):
         super(Denoiser, self).__init__()
@@ -377,16 +354,23 @@ class Denoiser(nn.Module):
         self.conv2 = nn.Conv2d(num_filters, num_filters, kernel_size=kernel_size, stride=2, padding=1)
         self.conv3 = nn.Conv2d(num_filters, num_filters, kernel_size=kernel_size, stride=2, padding=1)
         self.conv4 = nn.Conv2d(num_filters, num_filters, kernel_size=kernel_size, stride=2, padding=1)
-
-        # 替換 MultiHeadSelfAttention 為 SS2D
+        
         self.bottleneck = SS2D(
-            d_model=num_filters,  # 讓 d_model 與原本的 embed_size 對應
-            d_state=16,  # 根據 SS2D 預設值
-            d_conv=3, 
-            expand=2, 
-            dt_rank="auto"
+            d_model=num_filters,  # 確保與 num_filters 一致
+            d_state=16,
+            d_conv=3,
+            expand=2,
+            dt_rank="auto",
+            dt_min=0.001,
+            dt_max=0.1,
+            dt_init="random",
+            dt_scale=1.0,
+            dt_init_floor=1e-4,
+            dropout=0.,
+            conv_bias=True,
+            bias=False
         )
-
+        
         self.up2 = nn.Upsample(scale_factor=2, mode='nearest')
         self.up3 = nn.Upsample(scale_factor=2, mode='nearest')
         self.up4 = nn.Upsample(scale_factor=2, mode='nearest')
@@ -400,91 +384,20 @@ class Denoiser(nn.Module):
         x2 = self.activation(self.conv2(x1))
         x3 = self.activation(self.conv3(x2))
         x4 = self.activation(self.conv4(x3))
-
-        # 使用 SS2D 取代 MultiHeadSelfAttention
-        x_bottleneck, _, _, _ = self.bottleneck(x4)  # 選擇第一個輸出來匹配形狀 (B, C, H, W)
-
-        x = self.up4(x_bottleneck)
+        x = self.bottleneck(x4)  # (B, num_filters, H/8, W/8)
+        x = self.up4(x)
         x = self.up3(x + x3)
         x = self.up2(x + x2)
         x = x + x1
         x = self.res_layer(x)
         return torch.tanh(self.output_layer(x + x))
-
+    
     def _init_weights(self):
         for layer in [self.conv1, self.conv2, self.conv3, self.conv4, self.output_layer, self.res_layer]:
             init.kaiming_uniform_(layer.weight, a=0, mode='fan_in', nonlinearity='relu')
             if layer.bias is not None:
                 init.constant_(layer.bias, 0)
 
-# class LYT(nn.Module):
-#     def __init__(self, filters=32):
-#         super(LYT, self).__init__()
-#         self.process_y = self._create_processing_layers(filters)
-#         self.process_cb = self._create_processing_layers(filters)
-#         self.process_cr = self._create_processing_layers(filters)
-
-#         self.denoiser_cb = Denoiser(filters // 2)
-#         self.denoiser_cr = Denoiser(filters // 2)
-#         self.lum_pool = nn.MaxPool2d(8)
-#         self.lum_mhsa = MultiHeadSelfAttention(embed_size=filters, num_heads=4)
-#         self.lum_up = nn.Upsample(scale_factor=8, mode='nearest')
-#         self.lum_conv = nn.Conv2d(filters, filters, kernel_size=1, padding=0)
-#         self.ref_conv = nn.Conv2d(filters * 2, filters, kernel_size=1, padding=0)
-#         self.msef = MSEFBlock(filters)
-#         self.recombine = nn.Conv2d(filters * 2, filters, kernel_size=3, padding=1)
-#         self.final_adjustments = nn.Conv2d(filters, 3, kernel_size=3, padding=1)
-#         self._init_weights()
-
-#     def _create_processing_layers(self, filters):
-#         return nn.Sequential(
-#             nn.Conv2d(1, filters, kernel_size=3, padding=1),
-#             nn.ReLU(inplace=True)
-#         )
-    
-#     def _rgb_to_ycbcr(self, image):
-#         r, g, b = image[:, 0, :, :], image[:, 1, :, :], image[:, 2, :, :]
-    
-#         y = 0.299 * r + 0.587 * g + 0.114 * b
-#         u = -0.14713 * r - 0.28886 * g + 0.436 * b + 0.5
-#         v = 0.615 * r - 0.51499 * g - 0.10001 * b + 0.5
-        
-#         yuv = torch.stack((y, u, v), dim=1)
-#         return yuv
-
-#     def forward(self, inputs):
-#         ycbcr = self._rgb_to_ycbcr(inputs)
-#         y, cb, cr = torch.split(ycbcr, 1, dim=1)
-#         cb = self.denoiser_cb(cb) + cb
-#         cr = self.denoiser_cr(cr) + cr
-
-#         y_processed = self.process_y(y)
-#         cb_processed = self.process_cb(cb)
-#         cr_processed = self.process_cr(cr)
-
-#         ref = torch.cat([cb_processed, cr_processed], dim=1)
-#         lum = y_processed
-#         lum_1 = self.lum_pool(lum)
-#         lum_1 = self.lum_mhsa(lum_1)
-#         lum_1 = self.lum_up(lum_1)
-#         lum = lum + lum_1
-
-#         ref = self.ref_conv(ref)
-#         shortcut = ref
-#         ref = ref + 0.2 * self.lum_conv(lum)
-#         ref = self.msef(ref)
-#         ref = ref + shortcut
-
-#         recombined = self.recombine(torch.cat([ref, lum], dim=1))
-#         output = self.final_adjustments(recombined)
-#         return torch.sigmoid(output)
-    
-#     def _init_weights(self):
-#         for module in self.children():
-#             if isinstance(module, nn.Conv2d) or isinstance(module, nn.Linear):
-#                 init.kaiming_uniform_(module.weight, a=0, mode='fan_in', nonlinearity='relu')
-#                 if module.bias is not None:
-#                     init.constant_(module.bias, 0)
 class LYT(nn.Module):
     def __init__(self, filters=32):
         super(LYT, self).__init__()
@@ -495,16 +408,23 @@ class LYT(nn.Module):
         self.denoiser_cb = Denoiser(filters // 2)
         self.denoiser_cr = Denoiser(filters // 2)
         self.lum_pool = nn.MaxPool2d(8)
-
-        # 替換 MultiHeadSelfAttention 為 SS2D
+        
         self.lum_mhsa = SS2D(
-            d_model=filters,  # 讓 d_model 與 filters 保持一致
-            d_state=16, 
-            d_conv=3, 
-            expand=2, 
-            dt_rank="auto"
+            d_model=filters,  # 確保與 filters 一致
+            d_state=16,
+            d_conv=3,
+            expand=2,
+            dt_rank="auto",
+            dt_min=0.001,
+            dt_max=0.1,
+            dt_init="random",
+            dt_scale=1.0,
+            dt_init_floor=1e-4,
+            dropout=0.,
+            conv_bias=True,
+            bias=False
         )
-
+        
         self.lum_up = nn.Upsample(scale_factor=8, mode='nearest')
         self.lum_conv = nn.Conv2d(filters, filters, kernel_size=1, padding=0)
         self.ref_conv = nn.Conv2d(filters * 2, filters, kernel_size=1, padding=0)
@@ -521,11 +441,9 @@ class LYT(nn.Module):
     
     def _rgb_to_ycbcr(self, image):
         r, g, b = image[:, 0, :, :], image[:, 1, :, :], image[:, 2, :, :]
-    
         y = 0.299 * r + 0.587 * g + 0.114 * b
         u = -0.14713 * r - 0.28886 * g + 0.436 * b + 0.5
         v = 0.615 * r - 0.51499 * g - 0.10001 * b + 0.5
-        
         yuv = torch.stack((y, u, v), dim=1)
         return yuv
 
@@ -541,13 +459,9 @@ class LYT(nn.Module):
 
         ref = torch.cat([cb_processed, cr_processed], dim=1)
         lum = y_processed
-
-        lum_1 = self.lum_pool(lum)
-
-        # 使用 SS2D 取代 MultiHeadSelfAttention
-        lum_1, _, _, _ = self.lum_mhsa(lum_1)  # 選擇第一個輸出來匹配形狀 (B, C, H, W)
-
-        lum_1 = self.lum_up(lum_1)
+        lum_1 = self.lum_pool(lum)              # (B, filters, H/8, W/8)
+        lum_1 = self.lum_mhsa(lum_1)            # (B, filters, H/8, W/8)
+        lum_1 = self.lum_up(lum_1)              # (B, filters, H, W)
         lum = lum + lum_1
 
         ref = self.ref_conv(ref)
