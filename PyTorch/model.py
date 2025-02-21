@@ -8,16 +8,10 @@ from typing import Optional, Any
 from functools import partial
 
 try:
-    from .csm_triton import cross_scan_fn, cross_merge_fn
-except:
-    from csm_triton import cross_scan_fn, cross_merge_fn
-
-try:
-    from .csms6s import selective_scan_fn
-except:
     from csms6s import selective_scan_fn
+except:
+    from .csms6s import selective_scan_fn
 
-# Helper class for initialization (needed for SS2D)
 class mamba_init:
     @staticmethod
     def dt_init(dt_rank, d_inner, dt_scale=1.0, dt_init="random", dt_min=0.001, dt_max=0.1, dt_init_floor=1e-4):
@@ -27,111 +21,130 @@ class mamba_init:
             nn.init.constant_(dt_proj.weight, dt_init_std)
         elif dt_init == "random":
             nn.init.uniform_(dt_proj.weight, -dt_init_std, dt_init_std)
-        dt = torch.exp(torch.rand(d_inner) * (math.log(dt_max) - math.log(dt_min)) + math.log(dt_min)).clamp(min=dt_init_floor)
+        else:
+            raise NotImplementedError
+
+        dt = torch.exp(
+            torch.rand(d_inner) * (math.log(dt_max) - math.log(dt_min))
+            + math.log(dt_min)
+        ).clamp(min=dt_init_floor)
         inv_dt = dt + torch.log(-torch.expm1(-dt))
         with torch.no_grad():
             dt_proj.bias.copy_(inv_dt)
+
         return dt_proj
 
     @staticmethod
-    def A_log_init(d_state, d_inner, copies=-1, device=None, merge=True):
-        A = torch.arange(1, d_state + 1, dtype=torch.float32, device=device).view(1, -1).repeat(d_inner, 1).contiguous()
+    def A_log_init(d_state, d_inner, copies=-1, merge=True):
+        A = torch.arange(1, d_state + 1, dtype=torch.float32).view(1, -1).repeat(d_inner, 1)
         A_log = torch.log(A)
         if copies > 0:
             A_log = A_log[None].repeat(copies, 1, 1).contiguous()
             if merge:
                 A_log = A_log.flatten(0, 1)
         A_log = nn.Parameter(A_log)
-        A_log._no_weight_decay = True
         return A_log
 
     @staticmethod
-    def D_init(d_inner, copies=-1, device=None, merge=True):
-        D = torch.ones(d_inner, device=device)
+    def D_init(d_inner, copies=-1, merge=True):
+        D = torch.ones(d_inner)
         if copies > 0:
             D = D[None].repeat(copies, 1).contiguous()
             if merge:
                 D = D.flatten(0, 1)
         D = nn.Parameter(D)
-        D._no_weight_decay = True
         return D
 
     @classmethod
     def init_dt_A_D(cls, d_state, dt_rank, d_inner, dt_scale, dt_init, dt_min, dt_max, dt_init_floor, k_group=4):
-        dt_projs = [cls.dt_init(dt_rank, d_inner, dt_scale, dt_init, dt_min, dt_max, dt_init_floor) for _ in range(k_group)]
+        dt_projs = [
+            cls.dt_init(dt_rank, d_inner, dt_scale, dt_init, dt_min, dt_max, dt_init_floor)
+            for _ in range(k_group)
+        ]
         dt_projs_weight = nn.Parameter(torch.stack([t.weight for t in dt_projs], dim=0))
         dt_projs_bias = nn.Parameter(torch.stack([t.bias for t in dt_projs], dim=0))
         del dt_projs
+            
         A_logs = cls.A_log_init(d_state, d_inner, copies=k_group, merge=True)
         Ds = cls.D_init(d_inner, copies=k_group, merge=True)
         return A_logs, Ds, dt_projs_weight, dt_projs_bias
 
+
 class SS2D(nn.Module):
-    def __init__(self, embed_size, num_heads, d_state=16, ssm_ratio=1.0, forward_type="v2"):  # 將 ssm_ratio 改為 1.0
-        super(SS2D, self).__init__()
-        self.embed_size = embed_size
-        self.d_state = d_state
-        self.d_inner = int(ssm_ratio * embed_size)  # 現在 d_inner 與 embed_size 相同
-        self.dt_rank = math.ceil(embed_size / 16)  # 根據原始 SS2D 的預設設置
+    def __init__(
+        self,
+        d_model=96,
+        d_state=16,
+        ssm_ratio=2.0,
+        dt_rank="auto",
+        act_layer=nn.SiLU,
+        d_conv=3,
+        conv_bias=True,
+        dropout=0.0,
+        bias=False,
+        dt_min=0.001,
+        dt_max=0.1,
+        dt_init="random",
+        dt_scale=1.0,
+        dt_init_floor=1e-4,
+        forward_type="v2",
+        channel_first=False,
+        **kwargs,
+    ):
+        super().__init__()
         self.k_group = 4
-        self.channel_first = True  # 匹配 MultiHeadSelfAttention 的輸出格式 (batch_size, embed_size, height, width)
+        self.d_model = d_model
+        self.d_state = d_state
+        self.d_inner = int(ssm_ratio * d_model)
+        self.dt_rank = math.ceil(d_model / 16) if dt_rank == "auto" else dt_rank
+        self.channel_first = channel_first
+        self.with_dconv = d_conv > 1
+        Linear = nn.Linear
 
-        # 輸入投影層
-        self.in_proj = nn.Linear(embed_size, self.d_inner * 2, bias=False)
-        self.act = nn.SiLU()  # 使用與原始 SS2D 相同的激活函數
+        self.in_proj = Linear(d_model, self.d_inner * 2, bias=bias)
+        self.act = act_layer()
+        
+        if self.with_dconv:
+            self.conv2d = nn.Conv2d(
+                in_channels=self.d_inner,
+                out_channels=self.d_inner,
+                groups=self.d_inner,
+                bias=conv_bias,
+                kernel_size=d_conv,
+                padding=(d_conv - 1) // 2,
+            )
 
-        # 2D 卷積層（可選，根據需求調整）
-        self.conv2d = nn.Conv2d(
-            in_channels=self.d_inner,
-            out_channels=self.d_inner,
-            groups=self.d_inner,
-            bias=True,
-            kernel_size=3,
-            padding=1,
-        )
-
-        # x 投影層
-        self.x_proj = [nn.Linear(self.d_inner, (self.dt_rank + self.d_state * 2), bias=False) for _ in range(self.k_group)]
+        self.x_proj = [
+            nn.Linear(self.d_inner, (self.dt_rank + self.d_state * 2), bias=False)
+            for _ in range(self.k_group)
+        ]
         self.x_proj_weight = nn.Parameter(torch.stack([t.weight for t in self.x_proj], dim=0))
         del self.x_proj
 
-        # 初始化 dt, A, D
-        dt_min, dt_max, dt_init, dt_scale, dt_init_floor = 0.001, 0.1, "random", 1.0, 1e-4
         self.A_logs, self.Ds, self.dt_projs_weight, self.dt_projs_bias = mamba_init.init_dt_A_D(
             self.d_state, self.dt_rank, self.d_inner, dt_scale, dt_init, dt_min, dt_max, dt_init_floor, k_group=self.k_group,
         )
 
-        # 輸出層
         self.out_norm = nn.LayerNorm(self.d_inner)
-        self.out_proj = nn.Linear(self.d_inner, embed_size, bias=False)  # 投影回 embed_size
-        self.dropout = nn.Dropout(0.0)  # 可根據需求調整 dropout 率
+        self.out_proj = Linear(self.d_inner, d_model, bias=bias)
+        self.dropout = nn.Dropout(dropout) if dropout > 0. else nn.Identity()
 
-    def forward(self, x):
-        batch_size, embed_size, height, width = x.size()
-        
-        # 直接使用 (batch_size, embed_size, height, width) 作為輸入
-        x_flat = x.permute(0, 2, 3, 1).contiguous()  # 轉換為 (batch_size, height, width, embed_size)
-        x_flat = self.in_proj(x_flat)  # 投影到 d_inner * 2
-        x, z = x_flat.chunk(2, dim=-1)  # 分割為 x 和 z
-        z = self.act(z)  # 激活 z
-        x = x.permute(0, 3, 1, 2).contiguous()  # 轉換為 (batch_size, d_inner, height, width)
-        
-        # 應用 2D 卷積
-        x = self.conv2d(x)
+    def forward(self, x: torch.Tensor):
+        x = self.in_proj(x)
+        x, z = x.chunk(2, dim=-1)
+        z = self.act(z)
+        x = x.permute(0, 3, 1, 2).contiguous()
+        x = self.conv2d(x) if self.with_dconv else x
         x = self.act(x)
-        
-        # 選擇性掃描
-        selective_scan = partial(selective_scan_fn, backend="mamba")
+
         B, D, H, W = x.shape
-        D, N = self.A_logs.shape
-        K, D, R = self.dt_projs_weight.shape
         L = H * W
 
         x_hwwh = torch.stack([x.view(B, -1, L), torch.transpose(x, dim0=2, dim1=3).contiguous().view(B, -1, L)], dim=1).view(B, 2, -1, L)
         xs = torch.cat([x_hwwh, torch.flip(x_hwwh, dims=[-1])], dim=1)
 
         x_dbl = torch.einsum("b k d l, k c d -> b k c l", xs, self.x_proj_weight)
-        dts, Bs, Cs = torch.split(x_dbl, [R, N, N], dim=2)
+        dts, Bs, Cs = torch.split(x_dbl, [self.dt_rank, self.d_state, self.d_state], dim=2)
         dts = torch.einsum("b k r l, k d r -> b k d l", dts, self.dt_projs_weight)
 
         xs = xs.view(B, -1, L)
@@ -143,47 +156,61 @@ class SS2D(nn.Module):
         Ds = self.Ds.float()
         dt_projs_bias = self.dt_projs_bias.float().view(-1)
 
-        # 執行選擇性掃描
-        out_y = selective_scan(
-            xs, dts, As, Bs, Cs, Ds, dt_projs_bias, delta_softplus=True,
-        ).view(B, K, -1, H, W)
+        selective_scan = partial(selective_scan_fn, backend="mamba")
 
-        # 合併掃描結果
-        inv_y = torch.flip(out_y[:, 2:4], dims=[-1]).view(B, 2, -1, H, W)
-        wh_y = torch.transpose(out_y[:, 1].view(B, -1, W, H), dim0=2, dim1=3).contiguous()
-        invwh_y = torch.transpose(inv_y[:, 1].view(B, -1, W, H), dim0=2, dim1=3).contiguous()
+        out_y = selective_scan(xs, dts, As, Bs, Cs, Ds, delta_bias=dt_projs_bias, delta_softplus=True).view(B, self.k_group, -1, L)
+        
+        inv_y = torch.flip(out_y[:, 2:4], dims=[-1]).view(B, 2, -1, L)
+        wh_y = torch.transpose(out_y[:, 1].view(B, -1, W, H), dim0=2, dim1=3).contiguous().view(B, -1, L)
+        invwh_y = torch.transpose(inv_y[:, 1].view(B, -1, W, H), dim0=2, dim1=3).contiguous().view(B, -1, L)
         y = out_y[:, 0] + inv_y[:, 0] + wh_y + invwh_y
+        
+        y = y.transpose(dim0=1, dim1=2).contiguous().view(B, H, W, -1)
+        y = self.out_norm(y)
 
-        # 恢復形狀並應用層規範化和投影
-        y = y.view(B, -1, H, W)  # (batch_size, d_inner, height, width)
-        y = self.out_norm(y.view(B, H, W, -1)).view(B, -1, H, W)  # 應用層規範化
-        y = y * z.permute(0, 3, 1, 2).contiguous()  # 與 z 相乘
-        y = self.dropout(self.out_proj(y.view(B, H, W, -1)))  # 投影回 embed_size
+        y = y * z
+        out = self.dropout(self.out_proj(y))
+        return out
 
-        # 恢復原始形狀 (batch_size, embed_size, height, width)
-        return y
-
-# 替換 MultiHeadSelfAttention 的新類別
 class SS2DAttention(nn.Module):
-    def __init__(self, embed_size, num_heads):
+    def __init__(self, embed_size, num_heads, d_state=16, ssm_ratio=2.0, d_conv=3):
         super(SS2DAttention, self).__init__()
-        self.ss2d = SS2D(embed_size=embed_size, num_heads=num_heads, d_state=16, ssm_ratio=2.0, forward_type="v2")
-        self._init_weights()
+        self.embed_size = embed_size
+        self.num_heads = num_heads
+        
+        # SS2D 模組
+        self.ss2d = SS2D(
+            d_model=embed_size,
+            d_state=d_state,
+            ssm_ratio=ssm_ratio,
+            dt_rank="auto",
+            act_layer=nn.SiLU,
+            d_conv=d_conv,
+            conv_bias=True,
+            dropout=0.0,
+            bias=False,
+            forward_type="v2",
+            channel_first=False
+        )
 
     def forward(self, x):
-        return self.ss2d(x)
+        """
+        x: Tensor of shape (batch_size, embed_size, height, width)
+        output: Tensor of shape (batch_size, embed_size, height, width)
+        """
+        batch_size, embed_size, height, width = x.shape
+        assert embed_size == self.embed_size, f"Expected {self.embed_size}, got {embed_size}"
+        
+        # 轉換格式以適應 SS2D: (B, C, H, W) -> (B, H, W, C)
+        x = x.permute(0, 2, 3, 1).contiguous()
 
-    def _init_weights(self):
-        # 這裡可以根據需要初始化 SS2D 的權重，模仿 MultiHeadSelfAttention 的 Xavier 初始化
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.xavier_uniform_(m.weight)
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.Conv2d):
-                nn.init.xavier_uniform_(m.weight)
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
+        # SS2D 運算
+        x = self.ss2d(x)
+
+        # 轉換回原始格式: (B, H, W, C) -> (B, C, H, W)
+        x = x.permute(0, 3, 1, 2).contiguous()
+
+        return x
 
 class LayerNormalization(nn.Module):
     def __init__(self, dim):
