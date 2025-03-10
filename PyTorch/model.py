@@ -188,7 +188,7 @@ class LYT(nn.Module):
         lum = y_processed
         lum_1 = self.lum_pool(lum)
         # lum_1 = self.lum_mhsa(lum_1)
-        lum_1 = self.ss2d(lum_1)
+        lum_1 = self.ss2d(lum_1.permute(0, 2, 3, 1)) # 轉換為 (B, H, W, C)
         lum_1 = self.lum_up(lum_1)
         lum = lum + lum_1
 
