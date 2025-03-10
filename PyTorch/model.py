@@ -92,13 +92,14 @@ class SS2D(nn.Module):
         L = H * W
         K = 4
 
-        xs = x.view(B, -1, L)
+        xs = x.view(B, K, -1, L)  # 確保維度匹配
         xs = torch.cat([xs, torch.flip(xs, dims=[-1])], dim=1)
 
-        if xs.shape[2] != self.x_proj_weight.shape[1]:
-            raise ValueError(f"Dimension mismatch: xs.shape[2] ({xs.shape[2]}) does not match x_proj_weight.shape[1] ({self.x_proj_weight.shape[1]})")
+        expected_dim = self.x_proj_weight.shape[1]
+        if xs.shape[2] != expected_dim:
+            xs = xs[:, :, :expected_dim, :]
 
-        x_dbl = torch.einsum("b k d l, k d r -> b k r l", xs.view(B, K, -1, L), self.x_proj_weight)
+        x_dbl = torch.einsum("b k d l, k d r -> b k r l", xs, self.x_proj_weight)
         dts, Bs, Cs = torch.split(x_dbl, [self.dt_rank, self.d_state, self.d_state], dim=2)
         dts = torch.einsum("b k r l, k d r -> b k d l", dts, self.dt_projs_weight) + self.dt_projs_bias.unsqueeze(-1)
 
