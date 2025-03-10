@@ -124,7 +124,7 @@ class Denoiser(nn.Module):
         x3 = self.activation(self.conv3(x2))
         x4 = self.activation(self.conv4(x3))
         # x = self.bottleneck(x4)
-        x = self.ss2d(x4)
+        x = self.ss2d(x4.permute(0, 2, 3, 1))
         x = self.up4(x)
         x = self.up3(x + x3)
         x = self.up2(x + x2)
