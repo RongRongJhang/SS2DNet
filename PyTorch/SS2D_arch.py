@@ -471,7 +471,8 @@ class SS2D(nn.Module):
         if self.dropout is not None:
             out = self.dropout(out)
 
-        return out
+        # 將輸出轉換回 (B, C, H, W) 格式
+        return out.permute(0, 3, 1, 2)
 
 
 class VSSBlock(nn.Module):
