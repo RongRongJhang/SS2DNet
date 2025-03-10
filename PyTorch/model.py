@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.nn.init as init
-from .SS2D_arch import SS2D
+from SS2D_arch import SS2D
 
 class LayerNormalization(nn.Module):
     def __init__(self, dim):
