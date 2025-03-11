@@ -141,12 +141,17 @@ class Denoiser(nn.Module):
 class LYT(nn.Module):
     def __init__(self, filters=32):
         super(LYT, self).__init__()
-        self.process_y = self._create_processing_layers(filters)
-        self.process_cb = self._create_processing_layers(filters)
-        self.process_cr = self._create_processing_layers(filters)
+        # self.process_y = self._create_processing_layers(filters)
+        # self.process_cb = self._create_processing_layers(filters)
+        # self.process_cr = self._create_processing_layers(filters)
+        self.process_l = self._create_processing_layers(filters)
+        self.process_a = self._create_processing_layers(filters)
+        self.process_b = self._create_processing_layers(filters)
 
-        self.denoiser_cb = Denoiser(filters // 2)
-        self.denoiser_cr = Denoiser(filters // 2)
+        # self.denoiser_cb = Denoiser(filters // 2)
+        # self.denoiser_cr = Denoiser(filters // 2)
+        self.denoiser_a = Denoiser(filters // 2)
+        self.denoiser_b = Denoiser(filters // 2)
         self.lum_pool = nn.MaxPool2d(8)
         # self.lum_mhsa = MultiHeadSelfAttention(embed_size=filters, num_heads=4)
         self.ss2d = SS2D(d_model = filters)
@@ -173,19 +178,48 @@ class LYT(nn.Module):
         
         yuv = torch.stack((y, u, v), dim=1)
         return yuv
+    
+    def OKLab(self, image):
+        r, g, b = image[:, 0, :, :], image[:, 1, :, :], image[:, 2, :, :]
+
+        l = 0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b
+        m = 0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b
+        s = 0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b
+
+        eps = 1e-6
+        l_ = torch.sign(l) * (torch.abs(l) + eps).pow(1/3)
+        m_ = torch.sign(m) * (torch.abs(m) + eps).pow(1/3)
+        s_ = torch.sign(s) * (torch.abs(s) + eps).pow(1/3)
+
+        L = 0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_
+        a = 1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_
+        b = 0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086757660 * s_
+
+        oklab = torch.stack((L, a, b), dim=1)
+        return oklab
 
     def forward(self, inputs):
-        ycbcr = self._rgb_to_ycbcr(inputs)
-        y, cb, cr = torch.split(ycbcr, 1, dim=1)
-        cb = self.denoiser_cb(cb) + cb
-        cr = self.denoiser_cr(cr) + cr
+        # ycbcr = self._rgb_to_ycbcr(inputs)
+        # y, cb, cr = torch.split(ycbcr, 1, dim=1)
+        # cb = self.denoiser_cb(cb) + cb
+        # cr = self.denoiser_cr(cr) + cr
 
-        y_processed = self.process_y(y)
-        cb_processed = self.process_cb(cb)
-        cr_processed = self.process_cr(cr)
+        # y_processed = self.process_y(y)
+        # cb_processed = self.process_cb(cb)
+        # cr_processed = self.process_cr(cr)
+        oklab = self.OKLab(inputs)
+        l, a, b = torch.split(oklab, 1, dim=1)
+        a = self.denoiser_a(a) + a
+        b = self.denoiser_b(b) + b
 
-        ref = torch.cat([cb_processed, cr_processed], dim=1)
-        lum = y_processed
+        l_processed = self.process_l(l)
+        a_processed = self.process_a(a)
+        b_processed = self.process_b(b)
+
+        # ref = torch.cat([cb_processed, cr_processed], dim=1)
+        # lum = y_processed
+        ref = torch.cat([a_processed, b_processed], dim=1)
+        lum = l_processed
         lum_1 = self.lum_pool(lum)
         # lum_1 = self.lum_mhsa(lum_1)
         lum_1 = self.ss2d(lum_1.permute(0, 2, 3, 1)) # 轉換為 (B, H, W, C)
