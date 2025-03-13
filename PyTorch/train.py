@@ -186,8 +186,8 @@ def main():
         
         # write log
         now = datetime.now().strftime("%Y-%m-%d-%H%M%S")
-        with open(f"/content/drive/MyDrive/SS2D-Net/results/training/metrics{now}.md", "w") as f:
-            f.write(f"| Epoch: {epoch + 1} | PSNR: {avg_psnr:.6f} | SSIM: {avg_ssim:.6f} | LPIPS: {avg_lpips:.6f} |\n")
+        with open(f"/content/drive/MyDrive/SS2D-Net/results/training/metrics.md", "w") as f:
+            f.write(f"| Timestemp: {now} | Epoch: {epoch + 1} | PSNR: {avg_psnr:.6f} | SSIM: {avg_ssim:.6f} | LPIPS: {avg_lpips:.6f} |\n")
 
 if __name__ == '__main__':
     main()
