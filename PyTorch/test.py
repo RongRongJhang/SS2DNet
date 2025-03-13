@@ -94,7 +94,7 @@ def main():
     # os.makedirs(result_dir, exist_ok=True)
     result_dir = '/content/drive/MyDrive/SS2D-Net/results/'
 
-    _, test_loader = create_dataloaders(None, None, test_low, test_high, crop_size=None, batch_size=8) # batch_size 記得改
+    _, test_loader = create_dataloaders(None, None, test_low, test_high, crop_size=None, batch_size=1) # batch_size 記得改
     print(f'Test loader: {len(test_loader)}')
 
     model = LYT().to(device)

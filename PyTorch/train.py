@@ -11,6 +11,7 @@ from losses import CombinedLoss
 from dataloader import create_dataloaders
 import os
 import numpy as np
+import lpips
 
 def calculate_psnr(img1, img2, max_pixel_value=1.0, gt_mean=True):
     """
@@ -65,6 +66,9 @@ def validate(model, dataloader, device):
     model.eval()
     total_psnr = 0
     total_ssim = 0
+    total_lpips = 0
+    loss_fn = lpips.LPIPS(net='alex').to(device)
+
     with torch.no_grad():
         for low, high in dataloader:
             low, high = low.to(device), high.to(device)
@@ -95,7 +99,7 @@ def main():
     print(f'LR: {learning_rate}; Epochs: {num_epochs}')
 
     # Data loaders
-    train_loader, test_loader = create_dataloaders(train_low, train_high, test_low, test_high, crop_size=256, batch_size=8) # batch_size 記得改
+    train_loader, test_loader = create_dataloaders(train_low, train_high, test_low, test_high, crop_size=256, batch_size=1) # batch_size 記得改
     print(f'Train loader: {len(train_loader)}; Test loader: {len(test_loader)}')
 
     # Model, loss, optimizer, and scheduler
