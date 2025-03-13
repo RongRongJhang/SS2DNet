@@ -186,8 +186,15 @@ def main():
         
         # write log
         now = datetime.now().strftime("%Y-%m-%d-%H%M%S")
-        with open(f"/content/drive/MyDrive/SS2D-Net/results/training/metrics.md", "w") as f:
-            f.write(f"| Timestemp: {now} | Epoch: {epoch + 1} | PSNR: {avg_psnr:.6f} | SSIM: {avg_ssim:.6f} | LPIPS: {avg_lpips:.6f} |\n")
+        file_path = "/content/drive/MyDrive/SS2D-Net/results/training/metrics.md"
+        file_exists = os.path.exists(file_path)
+
+        with open(file_path, "a") as f:
+            if not file_exists:
+                f.write("| Timestemp | Epoch | PSNR | SSIM | LPIPS |\n")
+                f.write("|-----------|-------|------|------|-------|\n")
+            
+            f.write(f"| {now} | {epoch + 1} | {avg_psnr:.6f} | {avg_ssim:.6f} | {avg_lpips:.6f} |\n")
 
 if __name__ == '__main__':
     main()
