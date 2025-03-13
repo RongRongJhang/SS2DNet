@@ -63,7 +63,7 @@ def calculate_ssim(img1, img2, max_pixel_value=1.0, gt_mean=True):
     ssim_val = structural_similarity_index_measure(img1, img2, data_range=max_pixel_value)
     return ssim_val.item()
 
-def validate(model, dataloader, device):
+def validate(model, dataloader, device, result_dir):
     model.eval()
     total_psnr = 0
     total_ssim = 0
@@ -71,9 +71,12 @@ def validate(model, dataloader, device):
     loss_fn = lpips.LPIPS(net='alex').to(device)
 
     with torch.no_grad():
-        for low, high in dataloader:
+        for idx, (low, high) in enumerate(dataloader):
             low, high = low.to(device), high.to(device)
             output = model(low)
+
+            # Save the output image
+            save_image(output, os.path.join(result_dir, f'result_{idx}.png'))
 
             # Calculate PSNR
             psnr = calculate_psnr(output, high)
@@ -104,6 +107,8 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'LR: {learning_rate}; Epochs: {num_epochs}')
 
+    result_dir = '/content/drive/MyDrive/SS2D-Net/results/training/output'
+
     # Data loaders
     train_loader, test_loader = create_dataloaders(train_low, train_high, test_low, test_high, crop_size=256, batch_size=1) # batch_size 記得改
     print(f'Train loader: {len(train_loader)}; Test loader: {len(test_loader)}')
@@ -123,9 +128,10 @@ def main():
     best_ssim = 0
     best_lpips = 0
 
-    psnr = []
-    ssim = []
-    lpips = []
+    # add psnr, ssim and lpips list
+    # psnr = []
+    # ssim = []
+    # lpips = []
 
     print('Training started.')
     for epoch in range(num_epochs):
@@ -147,11 +153,11 @@ def main():
             train_loss += loss.item()
 
         # avg_psnr, avg_ssim = validate(model, test_loader, device)
-        avg_psnr, avg_ssim, avg_lpips = validate(model, test_loader, device)
+        avg_psnr, avg_ssim, avg_lpips = validate(model, test_loader, device, result_dir)
 
-        psnr.append(avg_psnr)
-        ssim.append(avg_ssim)
-        lpips.append(avg_lpips)
+        # psnr.append(avg_psnr)
+        # ssim.append(avg_ssim)
+        # lpips.append(avg_lpips)
         
         # print(f'Epoch {epoch + 1}/{num_epochs}, PSNR: {avg_psnr:.6f}, SSIM: {avg_ssim:.6f}')
         print(f'Epoch {epoch + 1}/{num_epochs}, PSNR: {avg_psnr:.6f}, SSIM: {avg_ssim:.6f}, LPIPS: {avg_lpips:.6f}') # add LPIPS
@@ -178,13 +184,10 @@ def main():
             torch.save(model.state_dict(), model_path)
             print(f'Saving model with LPIPS: {best_lpips:.6f}')
         
-    # write log
-    now = datetime.now().strftime("%Y-%m-%d-%H%M%S")
-    with open(f"/content/drive/MyDrive/SS2D-Net/results/training/metrics{now}.md", "w") as f:
-        f.write("| Epochs | PSNR | SSIM | LPIPS |\n")  
-        f.write("|----------------------|----------------------|----------------------|----------------------|\n")  
-        for i in range(len(psnr)):
-            f.write(f"| {(i+1)*10} | { psnr[i]:.6f} | {ssim[i]:.6f} | {lpips[i]:.6f} |\n")
+        # write log
+        now = datetime.now().strftime("%Y-%m-%d-%H%M%S")
+        with open(f"/content/drive/MyDrive/SS2D-Net/results/training/metrics{now}.md", "w") as f:
+            f.write(f"| Epoch: {epoch + 1} | PSNR: {avg_psnr:.6f} | SSIM: {avg_ssim:.6f} | LPIPS: {avg_lpips:.6f} |\n")
 
 if __name__ == '__main__':
     main()
