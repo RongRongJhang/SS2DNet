@@ -85,14 +85,16 @@ def main():
     # Paths and device setup
     test_low = 'data/LOLv1/Test/input'
     test_high = 'data/LOLv1/Test/target'
-    weights_path = 'best_model.pth'
+    # weights_path = 'best_model.pth'
+    weights_path = '/content/drive/MyDrive/SS2D-Net/best_model.pth'
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     dataset_name = test_low.split('/')[1]
-    result_dir = os.path.join('results', dataset_name)
-    os.makedirs(result_dir, exist_ok=True)
+    # result_dir = os.path.join('results', dataset_name)
+    # os.makedirs(result_dir, exist_ok=True)
+    result_dir = '/content/drive/MyDrive/SS2D-Net/results/'
 
-    _, test_loader = create_dataloaders(None, None, test_low, test_high, crop_size=None, batch_size=1)
+    _, test_loader = create_dataloaders(None, None, test_low, test_high, crop_size=None, batch_size=8) # batch_size 記得改
     print(f'Test loader: {len(test_loader)}')
 
     model = LYT().to(device)

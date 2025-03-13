@@ -95,7 +95,7 @@ def main():
     print(f'LR: {learning_rate}; Epochs: {num_epochs}')
 
     # Data loaders
-    train_loader, test_loader = create_dataloaders(train_low, train_high, test_low, test_high, crop_size=256, batch_size=1)
+    train_loader, test_loader = create_dataloaders(train_low, train_high, test_low, test_high, crop_size=256, batch_size=8) # batch_size 記得改
     print(f'Train loader: {len(train_loader)}; Test loader: {len(test_loader)}')
 
     # Model, loss, optimizer, and scheduler
@@ -134,7 +134,9 @@ def main():
 
         if avg_psnr > best_psnr:
             best_psnr = avg_psnr
-            torch.save(model.state_dict(), 'best_model.pth')
+            model_path = "/content/drive/MyDrive/SS2D-Net/best_model.pth"
+            torch.save(model.state_dict(), model_path)
+            # torch.save(model.state_dict(), 'best_model.pth')
             print(f'Saving model with PSNR: {best_psnr:.6f}')
 
 if __name__ == '__main__':

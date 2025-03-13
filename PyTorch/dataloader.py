@@ -38,7 +38,7 @@ class PairedDataset(Dataset):
 
         return low_image, high_image
 
-def create_dataloaders(train_low, train_high, test_low, test_high, crop_size=256, batch_size=1):
+def create_dataloaders(train_low, train_high, test_low, test_high, crop_size=256, batch_size=8): # batch_size 記得改
     transform = transforms.Compose([
         transforms.ToTensor(),
         # transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
