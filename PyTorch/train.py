@@ -126,7 +126,7 @@ def main():
     best_psnr = 0
     # add SSIM & LPIPS
     best_ssim = 0
-    best_lpips = 0
+    best_lpips = 1
 
     # add psnr, ssim and lpips list
     # psnr = []
