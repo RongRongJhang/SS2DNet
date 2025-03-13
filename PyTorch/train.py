@@ -87,8 +87,8 @@ def validate(model, dataloader, device, result_dir):
             total_ssim += ssim
 
             # Calculate LPIPS
-            lpips = loss_fn.forward(high, output)
-            total_lpips += lpips
+            lpips_score = loss_fn.forward(high, output)
+            total_lpips += lpips_score.item()
 
     avg_psnr = total_psnr / len(dataloader)
     avg_ssim = total_ssim / len(dataloader)
