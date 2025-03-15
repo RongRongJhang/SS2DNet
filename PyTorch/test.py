@@ -6,6 +6,8 @@ from dataloader import create_dataloaders
 import os
 import numpy as np
 from torchvision.utils import save_image
+import lpips
+from datetime import datetime
 
 def calculate_psnr(img1, img2, max_pixel_value=1.0, gt_mean=True):
     """
@@ -60,6 +62,9 @@ def validate(model, dataloader, device, result_dir):
     model.eval()
     total_psnr = 0
     total_ssim = 0
+    total_lpips = 0
+    loss_fn = lpips.LPIPS(net='alex').to(device)
+
     with torch.no_grad():
         for idx, (low, high) in enumerate(dataloader):
             low, high = low.to(device), high.to(device)
@@ -77,22 +82,30 @@ def validate(model, dataloader, device, result_dir):
             ssim = calculate_ssim(output, high)
             total_ssim += ssim
 
+            # Calculate LPIPS
+            lpips_score = loss_fn.forward(high, output)
+            total_lpips += lpips_score.item()
+
     avg_psnr = total_psnr / len(dataloader)
     avg_ssim = total_ssim / len(dataloader)
-    return avg_psnr, avg_ssim
+    avg_lpips = total_lpips / len(dataloader)
+
+    return avg_psnr, avg_ssim, avg_lpips
 
 def main():
     # Paths and device setup
     test_low = 'data/LOLv1/Test/input'
     test_high = 'data/LOLv1/Test/target'
+
     # weights_path = 'best_model.pth'
     weights_path = '/content/drive/MyDrive/SS2D-Net/best_model.pth'
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     dataset_name = test_low.split('/')[1]
     # result_dir = os.path.join('results', dataset_name)
     # os.makedirs(result_dir, exist_ok=True)
-    result_dir = '/content/drive/MyDrive/SS2D-Net/results/'
+    result_dir = '/content/drive/MyDrive/SS2D-Net/results/testing/output'
 
     _, test_loader = create_dataloaders(None, None, test_low, test_high, crop_size=None, batch_size=1) # batch_size 記得改
     print(f'Test loader: {len(test_loader)}')
@@ -101,8 +114,21 @@ def main():
     model.load_state_dict(torch.load(weights_path, map_location=device))
     print(f'Model loaded from {weights_path}')
 
-    avg_psnr, avg_ssim = validate(model, test_loader, device, result_dir)
-    print(f'Validation PSNR: {avg_psnr:.6f}, SSIM: {avg_ssim:.6f}')
+    avg_psnr, avg_ssim, avg_lpips = validate(model, test_loader, device, result_dir)
+    # print(f'Validation PSNR: {avg_psnr:.6f}, SSIM: {avg_ssim:.6f}')
+    print(f'Validation PSNR: {avg_psnr:.6f}, SSIM: {avg_ssim:.6f}, LPIPS: {avg_lpips:.6f}')
+
+    # write log
+    now = datetime.now().strftime("%Y-%m-%d-%H%M%S")
+    file_path = "/content/drive/MyDrive/SS2D-Net/results/testing/metrics.md"
+    file_exists = os.path.exists(file_path)
+
+    with open(file_path, "a") as f:
+        if not file_exists:
+            f.write("| Timestemp | PSNR | SSIM | LPIPS |\n")
+            f.write("|-----------|------|------|-------|\n")
+        
+        f.write(f"| {now} | {avg_psnr:.6f} | {avg_ssim:.6f} | {avg_lpips:.6f} |\n")
 
 if __name__ == '__main__':
     main()
