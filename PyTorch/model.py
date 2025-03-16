@@ -197,6 +197,35 @@ class LYT(nn.Module):
 
         oklab = torch.stack((L, a, b), dim=1)
         return oklab
+    
+    def OKLch(self, img):
+        # 分離 r, g, b 通道
+        r = img[:, 0, :, :]
+        g = img[:, 1, :, :]
+        b = img[:, 2, :, :]
+        
+        # 將線性 sRGB 轉換至中間表徵 l, m, s
+        l = 0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b
+        m = 0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b
+        s = 0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b
+        
+        # 分別取立方根 (使用 torch.sign 來正確處理正負值)
+        eps = 1e-6
+        l_ = torch.sign(l) * (torch.abs(l) + eps).pow(1/3)
+        m_ = torch.sign(m) * (torch.abs(m) + eps).pow(1/3)
+        s_ = torch.sign(s) * (torch.abs(s) + eps).pow(1/3)
+        
+        # 計算 Oklab 各通道
+        L = 0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_
+        a = 1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_
+        b = 0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086757660 * s_
+
+        c = torch.sqrt(a**2 + b**2)
+        h = torch.atan2(b, a)
+
+        # 合併 L, a, b 三個通道
+        oklch = torch.stack([L, c, h], dim=1)
+        return oklch
 
     def forward(self, inputs):
         # ycbcr = self._rgb_to_ycbcr(inputs)
@@ -207,18 +236,18 @@ class LYT(nn.Module):
         # y_processed = self.process_y(y)
         # cb_processed = self.process_cb(cb)
         # cr_processed = self.process_cr(cr)
-        oklab = self.OKLab(inputs)
-        l, a, b = torch.split(oklab, 1, dim=1)
-        a = self.denoiser_a(a) + a
-        b = self.denoiser_b(b) + b
+        oklch = self.OKLch(inputs)
+        l, c, h = torch.split(oklch, 1, dim=1)
+        c = self.denoiser_c(c) + c
+        h = self.denoiser_h(h) + h
 
         l_processed = self.process_l(l)
-        a_processed = self.process_a(a)
-        b_processed = self.process_b(b)
+        c_processed = self.process_c(c)
+        h_processed = self.process_h(h)
 
         # ref = torch.cat([cb_processed, cr_processed], dim=1)
         # lum = y_processed
-        ref = torch.cat([a_processed, b_processed], dim=1)
+        ref = torch.cat([c_processed, h_processed], dim=1)
         lum = l_processed
         lum_1 = self.lum_pool(lum)
         # lum_1 = self.lum_mhsa(lum_1)
