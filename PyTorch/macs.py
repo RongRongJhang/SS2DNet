@@ -1,10 +1,10 @@
 import torch
 from torchprofile import profile_macs
-from model import LYT
+from model import SS2DNet
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-model = LYT().to(device)
+model = SS2DNet().to(device)
 
 input_tensor = torch.randn(1, 3, 256, 256).to(device) 
 

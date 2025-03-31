@@ -6,7 +6,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 import torchvision.transforms as transforms
 from torchvision.utils import save_image
 from torchmetrics.functional import structural_similarity_index_measure
-from model import SS2DNet
+from model import GammaUnet
 from losses import CombinedLoss
 from dataloader import create_dataloaders
 import os
@@ -90,10 +90,10 @@ def validate(model, dataloader, device, result_dir):
             lpips_score = loss_fn.forward(high, output)
             total_lpips += lpips_score.item()
 
-
     avg_psnr = total_psnr / len(dataloader)
     avg_ssim = total_ssim / len(dataloader)
     avg_lpips = total_lpips / len(dataloader)
+
     return avg_psnr, avg_ssim, avg_lpips
 
 def main():
@@ -103,30 +103,36 @@ def main():
     test_low = 'data/LOLv1/Test/input'
     test_high = 'data/LOLv1/Test/target'
     learning_rate = 2e-4 
-    num_epochs = 1000
+    num_epochs = 1500
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'LR: {learning_rate}; Epochs: {num_epochs}')
 
     result_dir = '/content/drive/MyDrive/SS2D-Net/results/training/output'
 
     # Data loaders
-    train_loader, test_loader = create_dataloaders(train_low, train_high, test_low, test_high, crop_size=256, batch_size=1)
+    train_loader, test_loader = create_dataloaders(train_low, train_high, test_low, test_high, crop_size=256, batch_size=1) # batch_size 記得改
     print(f'Train loader: {len(train_loader)}; Test loader: {len(test_loader)}')
 
     # Model, loss, optimizer, and scheduler
-    model = SS2DNet().to(device)
+    model = GammaUnet().to(device)
     # if torch.cuda.device_count() > 1:
     #     model = torch.nn.DataParallel(model)
 
     criterion = CombinedLoss(device)
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     scheduler = CosineAnnealingLR(optimizer, T_max=num_epochs)
-    scaler = torch.amp.GradScaler('cuda')
+    scaler = torch.cuda.amp.GradScaler()
 
     best_psnr = 0
+    # add SSIM & LPIPS
     best_ssim = 0
     best_lpips = 1
-    
+
+    # add psnr, ssim and lpips list
+    # psnr = []
+    # ssim = []
+    # lpips = []
+
     print('Training started.')
     for epoch in range(num_epochs):
         model.train()
@@ -146,21 +152,24 @@ def main():
 
             train_loss += loss.item()
 
-        avg_train_loss = train_loss / len(train_loader)
-
+        # avg_psnr, avg_ssim = validate(model, test_loader, device)
         avg_psnr, avg_ssim, avg_lpips = validate(model, test_loader, device, result_dir)
-        
-        current_lr = optimizer.param_groups[0]['lr']
-        print(f'Epoch {epoch + 1}/{num_epochs}, LR: {current_lr:.6f}, Loss: {avg_train_loss:.6f}, PSNR: {avg_psnr:.6f}, SSIM: {avg_ssim:.6f}, LPIPS: {avg_lpips:.6f}')
 
+        # psnr.append(avg_psnr)
+        # ssim.append(avg_ssim)
+        # lpips.append(avg_lpips)
+        
+        # print(f'Epoch {epoch + 1}/{num_epochs}, PSNR: {avg_psnr:.6f}, SSIM: {avg_ssim:.6f}')
+        print(f'Epoch {epoch + 1}/{num_epochs}, PSNR: {avg_psnr:.6f}, SSIM: {avg_ssim:.6f}, LPIPS: {avg_lpips:.6f}') # add LPIPS
         scheduler.step()
 
         if avg_psnr > best_psnr:
             best_psnr = avg_psnr
             model_path = "/content/drive/MyDrive/SS2D-Net/best_psnr_model.pth"
             torch.save(model.state_dict(), model_path)
+            # torch.save(model.state_dict(), 'best_model.pth')
             print(f'Saving model with PSNR: {best_psnr:.6f}')
-
+        
         # add SSIM
         if avg_ssim > best_ssim:
             best_ssim = avg_ssim
@@ -182,10 +191,10 @@ def main():
 
         with open(file_path, "a") as f:
             if not file_exists:
-                f.write("|   Timestemp   |   Epoch   |    LR    |   Loss   |   PSNR   |   SSIM   |   LPIPS   |\n")
-                f.write("|---------------|-----------|----------|----------|----------|----------|-----------|\n")
+                f.write("| Timestemp | Epoch | PSNR | SSIM | LPIPS |\n")
+                f.write("|-----------|-------|------|------|-------|\n")
             
-            f.write(f"|   {now}   | {epoch + 1} | {current_lr:.6f} | {avg_train_loss:.6f} |  {avg_psnr:.6f}  |  {avg_ssim:.6f}  |  {avg_lpips:.6f}  |\n")
+            f.write(f"| {now} | {epoch + 1} | {avg_psnr:.6f} | {avg_ssim:.6f} | {avg_lpips:.6f} |\n")
 
 if __name__ == '__main__':
     main()
